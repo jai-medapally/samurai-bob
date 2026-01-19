@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Samurai Bob — Platformer</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; background:#0b0f14; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .wrap { display:flex; flex-direction:column; min-height:100vh; }
+    header {
+      padding:10px 14px; display:flex; gap:12px; align-items:center; justify-content:space-between;
+      border-bottom:1px solid #1b2533; background:#0e141c;
+    }
+    header .left { display:flex; gap:12px; align-items:center; }
+    header .badge { font-weight:700; letter-spacing:.2px; }
+    header .hint { opacity:.8; font-size:14px; }
+    header button {
+      background:#1a2636; border:1px solid #2a3b55; color:#e6eefc;
+      padding:8px 10px; border-radius:10px; cursor:pointer;
+    }
+    header button:hover { filter:brightness(1.08); }
+    #hud { display:flex; gap:12px; font-size:14px; opacity:.9; }
+    canvas { display:block; margin:0 auto; background: linear-gradient(#081018, #081018 40%, #050a10); }
+    footer { padding:10px 14px; opacity:.75; font-size:13px; border-top:1px solid #1b2533; background:#0e141c; }
+    kbd { background:#111a25; border:1px solid #25344a; padding:2px 6px; border-radius:6px; font-size:12px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="left">
+      <div class="badge">⚔️ Samurai Bob</div>
+      <div class="hint">Move: <kbd>←</kbd><kbd>→</kbd> Jump: <kbd>↑</kbd> Drop: <kbd>↓</kbd> + <kbd>↑</kbd> Restart: <kbd>R</kbd></div>
+    </div>
+    <div id="hud">
+      <div>Level: <span id="lvl">1</span></div>
+      <div>Coins: <span id="coins">0</span></div>
+      <div>Deaths: <span id="deaths">0</span></div>
+    </div>
+    <button id="mute">Sound: ON</button>
+  </header>
+
+  <canvas id="c" width="960" height="540"></canvas>
+
+  <footer>
+    Share tip: host this file on GitHub Pages / Netlify / Vercel and send the link to friends.
+  </footer>
+</div>
+
+<script>
+(() => {
+  // ---------- Canvas ----------
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+
+  // ---------- HUD ----------
+  const elLvl = document.getElementById("lvl");
+  const elCoins = document.getElementById("coins");
+  const elDeaths = document.getElementById("deaths");
+  const btnMute = document.getElementById("mute");
+
+  // ---------- Tiny sound (optional) ----------
+  let soundOn = true;
+  let audioCtx = null;
+  function beep(freq=440, dur=0.06, type="sine", vol=0.04) {
+    if (!soundOn) return;
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type;
+    o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start();
+    o.stop(audioCtx.currentTime + dur);
+  }
+  btnMute.onclick = () => {
+    soundOn = !soundOn;
+    btnMute.textContent = `Sound: ${soundOn ? "ON" : "OFF"}`;
+    if (soundOn) beep(660, 0.05, "square", 0.02);
+  };
+
+  // ---------- Input ----------
+  const keys = new Set();
+  addEventListener("keydown", (e) => {
+    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","r","R"].includes(e.key)) e.preventDefault();
+    keys.add(e.key);
+  });
+  addEventListener("keyup", (e) => keys.delete(e.key));
+
+  // ---------- Game constants ----------
+  const GRAV = 1800;        // px/s^2
+  const MOVE = 420;         // px/s
+  const JUMP = 720;         // px/s
+  const FRICTION = 0.86;    // ground friction
+  const AIR_DRAG = 0.93;
+
+  // ---------- World / levels ----------
+  // Tiles are rectangles. type:
+  // solid: full collision
+  // oneWay: only collide when falling onto it (drop-through allowed)
+  // spike: hazard
+  // coin: collectible
+  // goal: finish
+  const levels = [
+    {
+      spawn: {x: 80, y: 380},
+      rects: [
+        {type:"solid", x:0, y:500, w:960, h:40},
+        {type:"solid", x:0, y:0, w:20, h:540},
+        {type:"solid", x:940, y:0, w:20, h:540},
+
+        {type:"solid", x:140, y:420, w:220, h:20},
+        {type:"solid", x:420, y:360, w:180, h:20},
+        {type:"oneWay", x:650, y:300, w:180, h:14},
+        {type:"solid", x:740, y:440, w:140, h:20},
+      ],
+      spikes: [
+        {type:"spike", x:360, y:488, w:60, h:12},
+        {type:"spike", x:600, y:488, w:60, h:12},
+      ],
+      coins: [
+        {type:"coin", x:210, y:382, r:10, taken:false},
+        {type:"coin", x:470, y:322, r:10, taken:false},
+        {type:"coin", x:720, y:260, r:10, taken:false},
+      ],
+      goal: {type:"goal", x:880, y:450, w:30, h:50}
+    },
+    {
+      spawn: {x: 60, y: 380},
+      rects: [
+        {type:"solid", x:0, y:500, w:960, h:40},
+        {type:"solid", x:0, y:0, w:20, h:540},
+        {type:"solid", x:940, y:0, w:20, h:540},
+
+        {type:"solid", x:120, y:430, w:160, h:20},
+        {type:"solid", x:320, y:380, w:140, h:20},
+        {type:"oneWay", x:520, y:330, w:160, h:14},
+        {type:"solid", x:700, y:280, w:160, h:20},
+        {type:"solid", x:420, y:470, w:120, h:20},
+      ],
+      spikes: [
+        {type:"spike", x:260, y:488, w:60, h:12},
+        {type:"spike", x:560, y:488, w:60, h:12},
+        {type:"spike", x:620, y:488, w:60, h:12},
+      ],
+      coins: [
+        {type:"coin", x:180, y:390, r:10, taken:false},
+        {type:"coin", x:390, y:340, r:10, taken:false},
+        {type:"coin", x:600, y:290, r:10, taken:false},
+        {type:"coin", x:760, y:240, r:10, taken:false},
+      ],
+      goal: {type:"goal", x:880, y:230, w:30, h:50}
+    }
+  ];
+
+  // ---------- Player (Samurai Bob) ----------
+  const bob = {
+    x: 0, y: 0, w: 34, h: 46,
+    vx: 0, vy: 0,
+    onGround: false,
+    facing: 1, // 1 right, -1 left
+    canJump: true,
+    dropTimer: 0
+  };
+
+  let levelIndex = 0;
+  let totalCoins = 0;
+  let deaths = 0;
+
+  function loadLevel(i) {
+    levelIndex = i;
+    const L = levels[levelIndex];
+    // reset coins state per level (keep "taken" inside each level)
+    L.coins.forEach(c => c.taken = false);
+    bob.x = L.spawn.x; bob.y = L.spawn.y;
+    bob.vx = 0; bob.vy = 0;
+    bob.onGround = false;
+    bob.dropTimer = 0;
+    elLvl.textContent = String(levelIndex + 1);
+  }
+  loadLevel(0);
+
+  function rectIntersect(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function kill() {
+    deaths++;
+    elDeaths.textContent = String(deaths);
+    beep(120, 0.12, "sawtooth", 0.05);
+    loadLevel(levelIndex);
+  }
+
+  function winLevel() {
+    beep(880, 0.08, "square", 0.03);
+    beep(990, 0.08, "square", 0.03);
+    const next = levelIndex + 1;
+    if (next < levels.length) loadLevel(next);
+    else {
+      // Game complete: loop back but keep total coins
+      loadLevel(0);
+    }
+  }
+
+  // ---------- Physics / collision ----------
+  function moveAndCollide(dt) {
+    const L = levels[levelIndex];
+
+    // Apply gravity
+    bob.vy += GRAV * dt;
+
+    // Horizontal
+    bob.x += bob.vx * dt;
+    let playerRect = {x:bob.x, y:bob.y, w:bob.w, h:bob.h};
+
+    // collide with solids (horizontal)
+    for (const r of L.rects) {
+      if (r.type !== "solid") continue;
+      if (!rectIntersect(playerRect, r)) continue;
+      if (bob.vx > 0) bob.x = r.x - bob.w;
+      else if (bob.vx < 0) bob.x = r.x + r.w;
+      bob.vx = 0;
+      playerRect.x = bob.x;
+    }
+
+    // Vertical
+    bob.y += bob.vy * dt;
+    playerRect = {x:bob.x, y:bob.y, w:bob.w, h:bob.h};
+    bob.onGround = false;
+
+    // one-way platforms are only solid when falling, and when player was above the platform
+    const wantDrop = bob.dropTimer > 0;
+
+    for (const r of L.rects) {
+      const isSolid = r.type === "solid";
+      const isOneWay = r.type === "oneWay";
+      if (!isSolid && !isOneWay) continue;
+      if (!rectIntersect(playerRect, r)) continue;
+
+      if (isOneWay) {
+        // Only collide if falling, not dropping, and player's feet were above top
+        if (wantDrop) continue;
+        if (bob.vy <= 0) continue;
+
+        const prevY = bob.y - bob.vy * dt; // approximate previous y
+        const prevBottom = prevY + bob.h;
+        if (prevBottom > r.y + 2) continue; // wasn't above it
+      }
+
+      if (bob.vy > 0) {
+        bob.y = r.y - bob.h;
+        bob.vy = 0;
+        bob.onGround = true;
+      } else if (bob.vy < 0) {
+        bob.y = r.y + r.h;
+        bob.vy = 0;
+      }
+      playerRect.y = bob.y;
+    }
+
+    if (bob.dropTimer > 0) bob.dropTimer -= dt;
+  }
+
+  // ---------- Game loop ----------
+  let last = performance.now();
+  function tick(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+
+    // Restart
+    if (keys.has("r") || keys.has("R")) loadLevel(levelIndex);
+
+    // Movement input
+    const left = keys.has("ArrowLeft");
+    const right = keys.has("ArrowRight");
+    const up = keys.has("ArrowUp");
+    const down = keys.has("ArrowDown");
+
+    if (left && !right) { bob.vx = -MOVE; bob.facing = -1; }
+    else if (right && !left) { bob.vx = MOVE; bob.facing = 1; }
+    else {
+      // friction
+      bob.vx *= bob.onGround ? FRICTION : AIR_DRAG;
+      if (Math.abs(bob.vx) < 6) bob.vx = 0;
+    }
+
+    // Drop-through: Down + Up triggers a short "drop window"
+    if (down && up && bob.onGround) {
+      bob.dropTimer = 0.18;
+      bob.onGround = false;
+      bob.vy = 60;
+    }
+
+    // Jump
+    if (up && bob.onGround && bob.canJump && !(down && bob.dropTimer > 0)) {
+      bob.vy = -JUMP;
+      bob.onGround = false;
+      bob.canJump = false;
+      beep(520, 0.06, "triangle", 0.03);
+    }
+    if (!up) bob.canJump = true;
+
+    moveAndCollide(dt);
+
+    // Interactions
+    const L = levels[levelIndex];
+    const playerRect = {x:bob.x, y:bob.y, w:bob.w, h:bob.h};
+
+    // Spikes
+    for (const s of L.spikes) {
+      if (rectIntersect(playerRect, s)) { kill(); break; }
+    }
+
+    // Coins
+    for (const c of L.coins) {
+      if (c.taken) continue;
+      const dx = (bob.x + bob.w/2) - c.x;
+      const dy = (bob.y + bob.h/2) - c.y;
+      if (dx*dx + dy*dy < (c.r + 14) * (c.r + 14)) {
+        c.taken = true;
+        totalCoins++;
+        elCoins.textContent = String(totalCoins);
+        beep(880, 0.04, "sine", 0.03);
+        beep(1320, 0.04, "sine", 0.02);
+      }
+    }
+
+    // Goal
+    if (rectIntersect(playerRect, L.goal)) winLevel();
+
+    render();
+    requestAnimationFrame(tick);
+  }
+
+  // ---------- Rendering ----------
+  function render() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // subtle stars
+    ctx.save();
+    ctx.globalAlpha = 0.25;
+    for (let i=0; i<60; i++) {
+      const x = (i*137) % canvas.width;
+      const y = (i*83) % 240;
+      ctx.fillRect(x, y, 2, 2);
+    }
+    ctx.restore();
+
+    const L = levels[levelIndex];
+
+    // Platforms
+    for (const r of L.rects) {
+      if (r.type === "solid") {
+        ctx.fillStyle = "#1a2a3d";
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.fillStyle = "#2b4564";
+        ctx.fillRect(r.x, r.y, r.w, 4);
+      } else if (r.type === "oneWay") {
+        ctx.fillStyle = "#132232";
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.fillStyle = "#2b6a6a";
+        ctx.fillRect(r.x, r.y, r.w, 3);
+      }
+    }
+
+    // Spikes
+    for (const s of L.spikes) {
+      ctx.fillStyle = "#7a2631";
+      ctx.fillRect(s.x, s.y, s.w, s.h);
+      // little teeth
+      ctx.fillStyle = "#b83b4a";
+      for (let i=0; i<s.w; i+=10) {
+        ctx.beginPath();
+        ctx.moveTo(s.x+i, s.y+s.h);
+        ctx.lineTo(s.x+i+5, s.y);
+        ctx.lineTo(s.x+i+10, s.y+s.h);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    // Coins
+    for (const c of L.coins) {
+      if (c.taken) continue;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, c.r, 0, Math.PI*2);
+      ctx.fillStyle = "#caa24a";
+      ctx.fill();
+      ctx.strokeStyle = "#f2d27b";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // Goal gate
+    const g = L.goal;
+    ctx.fillStyle = "#1f3a2a";
+    ctx.fillRect(g.x, g.y, g.w, g.h);
+    ctx.fillStyle = "#47b36a";
+    ctx.fillRect(g.x, g.y, g.w, 6);
+
+    // Samurai Bob (simple pixel-ish character)
+    const bx = bob.x, by = bob.y;
+    // body
+    ctx.fillStyle = "#c7d3e6";
+    ctx.fillRect(bx, by+10, bob.w, bob.h-10);
+    // armor sash
+    ctx.fillStyle = "#2f5aa8";
+    ctx.fillRect(bx, by+26, bob.w, 8);
+    // head
+    ctx.fillStyle = "#e7c7a7";
+    ctx.fillRect(bx+6, by, bob.w-12, 16);
+    // bandana
+    ctx.fillStyle = "#b13c3c";
+    ctx.fillRect(bx+6, by+2, bob.w-12, 5);
+    // sword (facing)
+    ctx.fillStyle = "#9fb3c8";
+    if (bob.facing === 1) ctx.fillRect(bx + bob.w, by+18, 16, 3);
+    else ctx.fillRect(bx - 16, by+18, 16, 3);
+
+    // name tag
+    ctx.font = "12px system-ui";
+    ctx.fillStyle = "rgba(230,238,252,0.85)";
+    ctx.fillText("Bob", bx-2, by-6);
+  }
+
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
