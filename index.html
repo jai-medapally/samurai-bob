@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Samurai Bob - 4 Screen Race</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="title">Samurai Bob — 4 Screen Race</div>
+    <div class="hint" id="hint"></div>
+  </header>
+
+  <main class="wrap">
+    <canvas id="game"></canvas>
+
+    <div class="touch" id="touch">
+      <div class="touchRow">
+        <button class="btn" data-act="left">◀︎</button>
+        <button class="btn" data-act="right">▶︎</button>
+      </div>
+      <div class="touchRow">
+        <button class="btn big" data-act="jump">JUMP</button>
+      </div>
+      <div class="touchRow small">
+        <button class="btn" data-act="toggleP2">P2</button>
+        <button class="btn" data-act="toggleP3">P3</button>
+        <button class="btn" data-act="toggleP4">P4</button>
+      </div>
+    </div>
+  </main>
+
+  <script src="game.js"></script>
+</body>
+</html>
