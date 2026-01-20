@@ -1,407 +1,406 @@
 (() => {
+  // NOTE: GitHub Pages is static. This build supports "joining" across tabs
+  // on the SAME browser using BroadcastChannel. True cross-device multiplayer
+  // needs a backend (WebSocket/Firebase/Supabase).
+
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
   const hintEl = document.getElementById("hint");
+  const modal = document.getElementById("modal");
+  const nameInput = document.getElementById("nameInput");
+  const startBtn = document.getElementById("startBtn");
+  const controlsText = document.getElementById("controlsText");
   const touch = document.getElementById("touch");
 
-  // If canvas isn't found, show a useful error
-  if (!canvas || !ctx) {
-    const msg = "Canvas not found or 2D context failed. Check index.html has <canvas id='game'> and that game.js loads.";
-    alert(msg);
-    throw new Error(msg);
-  }
+  canvas.setAttribute("tabindex","0");
+  canvas.addEventListener("pointerdown", () => canvas.focus(), { passive:true });
 
-  // --- Responsive canvas with devicePixelRatio ---
-  function resize() {
+  function resize(){
     const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     const rect = canvas.getBoundingClientRect();
-    // If height is 0 (common cause of black screen), force a fallback
     const cssW = Math.max(320, rect.width);
     const cssH = Math.max(240, rect.height);
     canvas.width = Math.floor(cssW * dpr);
     canvas.height = Math.floor(cssH * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
   }
-  window.addEventListener("resize", resize, { passive: true });
+  window.addEventListener("resize", resize, { passive:true });
   resize();
 
-  // --- Load a "realistic" samurai image if you add it ---
-  // Put your file at: assets/samurai.png
   const samuraiImg = new Image();
   let samuraiReady = false;
-  samuraiImg.onload = () => (samuraiReady = true);
-  samuraiImg.onerror = () => (samuraiReady = false);
+  samuraiImg.onload = () => samuraiReady = true;
+  samuraiImg.onerror = () => samuraiReady = false;
   samuraiImg.src = "assets/samurai.png";
 
-  // --- World / lanes ---
   const LANES = 4;
-  const LANE_H = 220;               // logical lane height in world units
-  const GRAVITY = 2200;
-  const JUMP_V = 840;
-  const SPEED_BASE = 280;           // scroll speed
-  const SPEED_GROWTH = 12;          // speed increases over time
-  const OBSTACLE_BASE_GAP = 520;
-  const OBSTACLE_GAP_DECAY = 0.995; // gets tighter over time
+  const LANE_H = 90;
+  const TRACK_H = LANES * LANE_H;
+
+  const GRAVITY = 2600;
+  const JUMP_V = 920;
+  const RUN_SPEED = 320;
+  const SPEED_GROWTH = 14;
+
+  const GAP_BASE = 520;
+  const GAP_DECAY = 0.995;
+
   const SPIKE_W = 26, SPIKE_H = 42;
 
-  // Each player runs in their own endless lane (race).
-  // We draw each lane as a separate "screen" (quadrant).
-  const players = [];
-  const obstacles = [[], [], [], []];
-  let time = 0;
-  let aliveCount = 4;
+  const COLORS = {1:"#47b8ff", 2:"#51e08a", 3:"#ff5a6f", 4:"#ffb14a"};
 
-  function makePlayer(i) {
-    return {
-      id: i,
-      x: 140,
-      y: 0,
-      vy: 0,
-      w: 44,
-      h: 74,
-      onGround: true,
-      score: 0,
-      isHuman: i === 0,  // default: P1 human, others CPU (you can toggle on mobile)
-      input: { left: false, right: false, jump: false },
-      cpuJumpCooldown: 0,
-      dead: false
+  const KEYMAP = {
+    1: { left: "ArrowLeft", right: "ArrowRight", jump: "ArrowUp" },
+    2: { left: "KeyA", right: "KeyD", jump: "KeyW" },
+    3: { left: "KeyJ", right: "KeyL", jump: "KeyI" },
+    4: { left: "Numpad4", right: "Numpad6", jump: "Numpad8" },
+  };
+
+  function controlsLabel(slot){
+    const m = KEYMAP[slot];
+    const pretty = (code) => {
+      if (code.startsWith("Arrow")) return code.replace("Arrow","") + " Arrow";
+      if (code.startsWith("Key")) return code.replace("Key","");
+      if (code.startsWith("Numpad")) return "Numpad " + code.replace("Numpad","");
+      return code;
     };
-  }
-  for (let i = 0; i < LANES; i++) players.push(makePlayer(i));
-
-  function laneGroundY() {
-    return LANE_H - 40;
+    return `${pretty(m.left)} / ${pretty(m.right)} to move, ${pretty(m.jump)} to jump`;
   }
 
-  function rand(min, max) {
-    return Math.random() * (max - min) + min;
+  const CPU_NAMES = ["Kenshin","Hanzo","Musashi","Yoshi","Akira","Ryu","Sora","Takeshi","Kaito","Ren","Kaede","Aiko","Hikari","Mika","Yuna","Kira","Rei","Nobu","Shin","Daichi"];
+  function randomCpuName(used){
+    const pool = CPU_NAMES.filter(n => !used.has(n));
+    if (pool.length) return pool[Math.floor(Math.random()*pool.length)];
+    return "CPU-" + Math.floor(Math.random()*9999);
   }
+  function rand(min,max){ return Math.random()*(max-min)+min; }
 
-  function spawnObstacle(lane, worldX) {
-    // mix spikes + knives (vertical blade) as difficulty grows
-    const kind = Math.random() < 0.65 ? "spike" : "knife";
-    const h = kind === "spike" ? SPIKE_H : rand(50, 90);
-    const w = kind === "spike" ? SPIKE_W : rand(14, 20);
-    const y = laneGroundY() - h;
-    obstacles[lane].push({ x: worldX, y, w, h, kind });
-  }
+  const room = new URLSearchParams(location.search).get("room") || "default";
+  const bc = ("BroadcastChannel" in window) ? new BroadcastChannel("samurai-bob-room-" + room) : null;
+  const myTabId = Math.random().toString(16).slice(2);
 
-  // initial obstacles
-  for (let lane = 0; lane < LANES; lane++) {
-    let x = 600;
-    for (let k = 0; k < 6; k++) {
-      spawnObstacle(lane, x);
-      x += OBSTACLE_BASE_GAP + rand(-120, 120);
-    }
-  }
+  const players = [];
+  const obstacles = [];
+  let time = 0;
+  let started = false;
 
-  // --- Controls (Desktop) ---
+  let mySlot = null;
+  let myName = "";
+  let camX = 0;
+
   const keys = new Set();
   window.addEventListener("keydown", (e) => {
-    keys.add(e.code);
     if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code)) e.preventDefault();
-  }, { passive: false });
-  window.addEventListener("keyup", (e) => keys.delete(e.code), { passive: true });
+    keys.add(e.code);
+  }, { passive:false });
+  window.addEventListener("keyup", (e) => keys.delete(e.code), { passive:true });
 
-  // Key maps per player (desktop)
-  const keyMap = [
-    { left: "ArrowLeft", right: "ArrowRight", jump: "ArrowUp" }, // P1
-    { left: "KeyA",      right: "KeyD",      jump: "KeyW" },     // P2
-    { left: "KeyJ",      right: "KeyL",      jump: "KeyI" },     // P3
-    { left: "Numpad4",   right: "Numpad6",   jump: "Numpad8" },  // P4
-  ];
-
-  function readInputs() {
-    for (let i = 0; i < LANES; i++) {
-      const p = players[i];
-      p.input.left = false;
-      p.input.right = false;
-      p.input.jump = false;
-
-      if (!p.isHuman || p.dead) continue;
-
-      const m = keyMap[i];
-      p.input.left = keys.has(m.left);
-      p.input.right = keys.has(m.right);
-      p.input.jump = keys.has(m.jump) || keys.has("Space");
-    }
-  }
-
-  // --- Touch controls (mobile) ---
-  // Touch always controls P1; buttons can toggle P2/P3/P4 human on tablets if you want.
   const touchState = { left:false, right:false, jump:false };
-  function bindTouchButton(btn, act) {
-    const on = (v) => {
-      if (act === "left") touchState.left = v;
-      if (act === "right") touchState.right = v;
-      if (act === "jump") touchState.jump = v;
+  function bindTouch(btn, act){
+    const set = (v) => {
+      if (act==="left") touchState.left=v;
+      if (act==="right") touchState.right=v;
+      if (act==="jump") touchState.jump=v;
     };
-    btn.addEventListener("pointerdown", (e) => { e.preventDefault(); on(true); }, { passive:false });
-    btn.addEventListener("pointerup",   (e) => { e.preventDefault(); on(false); }, { passive:false });
-    btn.addEventListener("pointercancel",(e)=> { on(false); }, { passive:true });
-    btn.addEventListener("pointerleave",(e)=> { on(false); }, { passive:true });
+    btn.addEventListener("pointerdown", (e)=>{ e.preventDefault(); set(true); }, { passive:false });
+    btn.addEventListener("pointerup", (e)=>{ e.preventDefault(); set(false); }, { passive:false });
+    btn.addEventListener("pointercancel", ()=>set(false), { passive:true });
+    btn.addEventListener("pointerleave", ()=>set(false), { passive:true });
   }
-
-  if (touch) {
-    touch.querySelectorAll(".btn").forEach((b) => {
-      const act = b.getAttribute("data-act");
-      if (act === "left" || act === "right" || act === "jump") bindTouchButton(b, act);
-
-      if (act === "toggleP2") b.addEventListener("click", () => players[1].isHuman = !players[1].isHuman);
-      if (act === "toggleP3") b.addEventListener("click", () => players[2].isHuman = !players[2].isHuman);
-      if (act === "toggleP4") b.addEventListener("click", () => players[3].isHuman = !players[3].isHuman);
+  if (touch){
+    touch.querySelectorAll(".btn").forEach(b=>{
+      const act=b.getAttribute("data-act");
+      bindTouch(b, act);
     });
   }
 
-  function applyTouchToP1() {
-    const p1 = players[0];
-    if (!p1.dead && p1.isHuman) {
-      p1.input.left = touchState.left;
-      p1.input.right = touchState.right;
-      p1.input.jump = touchState.jump;
+  function laneTop(slot){ return (slot-1)*LANE_H; }
+  function groundY(slot){ return laneTop(slot) + (LANE_H - 16); }
+
+  function makePlayer(slot, name, isCpu){
+    return {
+      slot, name, isCpu,
+      color: COLORS[slot],
+      x: 140,
+      y: laneTop(slot) + (LANE_H - 64),
+      vy: 0,
+      w: 44, h: 74,
+      onGround: true,
+      dead: false,
+      distance: 0,
+      cpuCooldown: 0
+    };
+  }
+
+  function spawnObstacle(worldX){
+    const kind = Math.random() < 0.65 ? "spike" : "knife";
+    const h = kind==="spike" ? SPIKE_H : rand(50,90);
+    const w = kind==="spike" ? SPIKE_W : rand(14,20);
+    for (let slot=1; slot<=4; slot++){
+      const y = groundY(slot) - h;
+      obstacles.push({ x: worldX, y, w, h, kind, slot });
     }
   }
 
-  // --- CPU logic ---
-  function cpuThink(p, lane, dt, speed) {
-    if (p.cpuJumpCooldown > 0) p.cpuJumpCooldown -= dt;
+  function initWorld(){
+    players.length=0;
+    obstacles.length=0;
+    time=0;
+    camX=0;
 
-    // Look at the next obstacle in front
-    const obs = obstacles[lane].find(o => o.x + o.w > p.x && o.x - p.x < 220);
-    if (!obs) return;
+    const used = new Set();
+    if (myName) used.add(myName);
 
-    const dist = obs.x - p.x;
-    const timeToHit = dist / Math.max(1, speed);
-    const shouldJump = (timeToHit < 0.35);
+    for (let slot=1; slot<=4; slot++){
+      if (slot===mySlot) players.push(makePlayer(slot, myName, false));
+      else {
+        const cpuName = randomCpuName(used);
+        used.add(cpuName);
+        players.push(makePlayer(slot, cpuName, true));
+      }
+    }
 
-    if (shouldJump && p.onGround && p.cpuJumpCooldown <= 0) {
+    let x=700;
+    for (let k=0;k<7;k++){
+      spawnObstacle(x);
+      x += GAP_BASE + rand(-140,170);
+    }
+  }
+
+  function readMyInput(){
+    const m = KEYMAP[mySlot];
+    return {
+      left: keys.has(m.left) || touchState.left,
+      right: keys.has(m.right) || touchState.right,
+      jump: keys.has(m.jump) || keys.has("Space") || touchState.jump
+    };
+  }
+
+  function cpuThink(p, dt, speed){
+    if (p.cpuCooldown>0) p.cpuCooldown -= dt;
+    const next = obstacles.find(o => o.slot===p.slot && o.x + o.w > p.x && o.x - p.x < 240);
+    if (!next) return;
+    const tHit = (next.x - p.x) / Math.max(1, speed);
+    if (tHit < 0.36 && p.onGround && p.cpuCooldown<=0){
       p.vy = -JUMP_V;
       p.onGround = false;
-      p.cpuJumpCooldown = 0.25 + Math.random() * 0.18;
+      p.cpuCooldown = 0.25 + Math.random()*0.2;
     }
   }
 
-  // --- Collision ---
-  function aabb(ax, ay, aw, ah, bx, by, bw, bh) {
+  function aabb(ax,ay,aw,ah,bx,by,bw,bh){
     return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
   }
 
-  // --- Drawing helpers ---
-  function drawSamurai(px, py, w, h, tint) {
-    if (samuraiReady) {
+  function drawSamurai(px,py,w,h,tint){
+    if (samuraiReady){
       ctx.save();
-      ctx.globalAlpha = 0.98;
+      ctx.globalAlpha=0.98;
       ctx.drawImage(samuraiImg, px, py, w, h);
-      ctx.globalCompositeOperation = "source-atop";
-      ctx.globalAlpha = 0.20;
-      ctx.fillStyle = tint;
-      ctx.fillRect(px, py, w, h);
+      ctx.globalCompositeOperation="source-atop";
+      ctx.globalAlpha=0.26;
+      ctx.fillStyle=tint;
+      ctx.fillRect(px,py,w,h);
       ctx.restore();
       return;
     }
-
-    // Fallback silhouette
     ctx.save();
-    ctx.fillStyle = tint;
-    ctx.fillRect(px + 12, py + 18, w - 24, h - 18); // body
-    ctx.beginPath(); // head
-    ctx.arc(px + w/2, py + 16, 12, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillRect(px + w/2 - 2, py + 26, 4, 16); // neck
-    // katana
-    ctx.fillRect(px + w - 10, py + 30, 26, 4);
+    ctx.fillStyle=tint;
+    ctx.fillRect(px+12, py+18, w-24, h-18);
+    ctx.beginPath(); ctx.arc(px+w/2, py+16, 12, 0, Math.PI*2); ctx.fill();
+    ctx.fillRect(px+w/2-2, py+26, 4, 16);
+    ctx.fillRect(px+w-10, py+30, 26, 4);
     ctx.restore();
   }
 
-  function drawObstacle(o) {
-    if (o.kind === "spike") {
+  function drawObstacle(o, sx, sy){
+    ctx.save(); ctx.translate(sx,sy);
+    if (o.kind==="spike"){
       ctx.beginPath();
-      ctx.moveTo(o.x, o.y + o.h);
-      ctx.lineTo(o.x + o.w/2, o.y);
-      ctx.lineTo(o.x + o.w, o.y + o.h);
+      ctx.moveTo(0,o.h);
+      ctx.lineTo(o.w/2,0);
+      ctx.lineTo(o.w,o.h);
       ctx.closePath();
       ctx.fill();
     } else {
-      // knife: thin blade + handle
-      ctx.fillRect(o.x, o.y, o.w, o.h);
-      ctx.fillRect(o.x - 6, o.y + o.h - 14, o.w + 12, 6);
+      ctx.fillRect(0,0,o.w,o.h);
+      ctx.fillRect(-6,o.h-14,o.w+12,6);
     }
+    ctx.restore();
   }
 
-  // --- Viewports (4 screens) ---
-  function getViewports() {
-    const w = canvas.getBoundingClientRect().width;
-    const h = canvas.getBoundingClientRect().height;
-    const halfW = w / 2;
-    const halfH = h / 2;
-    return [
-      { x: 0,     y: 0,     w: halfW, h: halfH }, // P1
-      { x: halfW, y: 0,     w: halfW, h: halfH }, // P2
-      { x: 0,     y: halfH, w: halfW, h: halfH }, // P3
-      { x: halfW, y: halfH, w: halfW, h: halfH }, // P4
-    ];
+  function broadcast(msg){
+    if (!bc) return;
+    bc.postMessage({ ...msg, _from: myTabId, _t: Date.now() });
   }
 
-  const tints = ["#7bd6ff", "#ffd27b", "#a7ff7b", "#ff7bd6"];
+  function applyRemoteClaim(slot, name){
+    const p = players.find(pp=>pp.slot===slot);
+    if (!p) return;
+    p.isCpu=false;
+    if (name) p.name=name;
+  }
 
-  // --- Game Loop ---
+  if (bc){
+    bc.onmessage = (ev)=>{
+      const msg = ev.data;
+      if (!msg || msg._from===myTabId) return;
+      if (msg.type==="claim" && started) applyRemoteClaim(msg.slot, msg.name);
+    };
+  }
+
+  let selectedSlot = null;
+  function updateStartEnabled(){
+    const nameOk = (nameInput.value||"").trim().length>=1;
+    startBtn.disabled = !(nameOk && selectedSlot);
+    if (selectedSlot) controlsText.textContent = controlsLabel(selectedSlot);
+  }
+
+  document.querySelectorAll(".slot").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      document.querySelectorAll(".slot").forEach(b=>b.classList.remove("selected"));
+      btn.classList.add("selected");
+      selectedSlot = Number(btn.getAttribute("data-slot"));
+      updateStartEnabled();
+    });
+  });
+  nameInput.addEventListener("input", updateStartEnabled);
+
+  const params = new URLSearchParams(location.search);
+  const preSlot = Number(params.get("slot")||0);
+  const preName = (params.get("name")||"").trim();
+  if (preName) nameInput.value = preName;
+  if (preSlot>=1 && preSlot<=4){
+    const b = document.querySelector(`.slot[data-slot="${preSlot}"]`);
+    if (b) b.click();
+  }
+  updateStartEnabled();
+
+  startBtn.addEventListener("click", ()=>{
+    myName = (nameInput.value||"Player").trim().slice(0,16);
+    mySlot = selectedSlot;
+    started = true;
+    modal.style.display="none";
+    canvas.focus();
+    initWorld();
+    broadcast({ type:"claim", slot: mySlot, name: myName });
+  });
+
   let last = performance.now();
-  function frame(now) {
-    const dt = Math.min(0.033, (now - last) / 1000);
+  function loop(now){
+    const dt = Math.min(0.033, (now-last)/1000);
     last = now;
-    time += dt;
 
-    readInputs();
-    applyTouchToP1();
-
-    const speed = SPEED_BASE + time * SPEED_GROWTH;
-    const gapFactor = Math.pow(OBSTACLE_GAP_DECAY, time);
-
-    // update each lane/player
-    aliveCount = 0;
-    for (let lane = 0; lane < LANES; lane++) {
-      const p = players[lane];
-      if (!p.dead) aliveCount++;
-
-      if (!p.isHuman && !p.dead) cpuThink(p, lane, dt, speed);
-
-      // Horizontal run (endless)
-      let vx = speed;
-      if (p.isHuman) {
-        if (p.input.left) vx -= 90;
-        if (p.input.right) vx += 90;
-      }
-      p.x += vx * dt;
-      p.score += vx * dt;
-
-      // jump
-      if (!p.dead && p.input.jump && p.onGround) {
-        p.vy = -JUMP_V;
-        p.onGround = false;
-      }
-
-      // gravity
-      p.vy += GRAVITY * dt;
-      p.y += p.vy * dt;
-
-      // ground
-      const gy = laneGroundY() - p.h;
-      if (p.y > gy) {
-        p.y = gy;
-        p.vy = 0;
-        p.onGround = true;
-      }
-
-      // Spawn more obstacles ahead
-      const obsList = obstacles[lane];
-      const lastObs = obsList[obsList.length - 1];
-      if (lastObs && (lastObs.x - p.x) < 1100) {
-        const nextX = lastObs.x + (OBSTACLE_BASE_GAP * gapFactor) + rand(-140, 160);
-        spawnObstacle(lane, nextX);
-      }
-
-      // death check
-      if (!p.dead) {
-        for (const o of obsList) {
-          if (aabb(p.x, p.y, p.w, p.h, o.x, o.y, o.w, o.h)) {
-            p.dead = true;
-            break;
-          }
-        }
-      }
-
-      // cleanup old obstacles (behind)
-      while (obsList.length && obsList[0].x < p.x - 600) obsList.shift();
-    }
-
-    // draw
     const rect = canvas.getBoundingClientRect();
-    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.clearRect(0,0,rect.width,rect.height);
 
-    const vps = getViewports();
+    if (!started){
+      hintEl.textContent = "Pick a slot + name. Click the game to enable arrow keys.";
+      requestAnimationFrame(loop);
+      return;
+    }
 
-    for (let i = 0; i < LANES; i++) {
-      const vp = vps[i];
-      const p = players[i];
+    time += dt;
+    const speed = RUN_SPEED + time*SPEED_GROWTH;
+    const gapFactor = Math.pow(GAP_DECAY, time);
 
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(vp.x, vp.y, vp.w, vp.h);
-      ctx.clip();
+    const myInput = readMyInput();
 
-      // background
-      ctx.fillStyle = "rgba(0,0,0,0.18)";
-      ctx.fillRect(vp.x, vp.y, vp.w, vp.h);
+    for (const p of players){
+      if (p.dead) continue;
 
-      // camera (follow player)
-      const camX = p.x - 140;
-
-      // floor
-      ctx.fillStyle = "rgba(255,255,255,0.08)";
-      const floorY = vp.y + (vp.h - 36);
-      ctx.fillRect(vp.x, floorY, vp.w, 36);
-
-      // subtle grid
-      ctx.strokeStyle = "rgba(255,255,255,0.06)";
-      ctx.lineWidth = 1;
-      for (let gx = 0; gx < vp.w; gx += 40) {
-        ctx.beginPath();
-        ctx.moveTo(vp.x + gx, vp.y);
-        ctx.lineTo(vp.x + gx, vp.y + vp.h);
-        ctx.stroke();
-      }
-
-      // obstacles
-      ctx.fillStyle = "rgba(255,90,90,0.95)";
-      for (const o of obstacles[i]) {
-        const sx = vp.x + (o.x - camX);
-        const sy = vp.y + (o.y) + (vp.h - LANE_H);
-        if (sx > vp.x - 60 && sx < vp.x + vp.w + 60) {
-          ctx.save();
-          ctx.translate(sx, sy);
-          drawObstacle({ ...o, x: 0, y: 0 });
-          ctx.restore();
+      let vx = speed;
+      if (!p.isCpu && p.slot===mySlot){
+        if (myInput.left) vx -= 110;
+        if (myInput.right) vx += 110;
+        if (myInput.jump && p.onGround){
+          p.vy = -JUMP_V;
+          p.onGround=false;
         }
+      } else if (p.isCpu){
+        cpuThink(p, dt, speed);
       }
 
-      // player
-      const px = vp.x + (p.x - camX);
-      const py = vp.y + (p.y) + (vp.h - LANE_H);
-      drawSamurai(px, py, p.w, p.h, tints[i]);
+      p.x += vx*dt;
+      p.distance += vx*dt;
 
-      // HUD
-      ctx.fillStyle = "rgba(255,255,255,0.95)";
-      ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Arial";
-      const mode = p.isHuman ? "HUMAN" : "CPU";
+      p.vy += GRAVITY*dt;
+      p.y += p.vy*dt;
+
+      const gy = groundY(p.slot) - p.h;
+      if (p.y>gy){
+        p.y=gy; p.vy=0; p.onGround=true;
+      }
+
+      for (const o of obstacles){
+        if (o.slot!==p.slot) continue;
+        if (aabb(p.x,p.y,p.w,p.h,o.x,o.y,o.w,o.h)){ p.dead=true; break; }
+      }
+    }
+
+    const leader = players.reduce((a,b)=> a.distance>b.distance ? a : b, players[0]);
+    const lane1 = obstacles.filter(o=>o.slot===1);
+    const lastObs = lane1[lane1.length-1];
+    if (lastObs && (lastObs.x - leader.x) < 1150){
+      const nextX = lastObs.x + (GAP_BASE*gapFactor) + rand(-150,190);
+      spawnObstacle(nextX);
+    }
+
+    const me = players.find(p=>p.slot===mySlot);
+    const follow = (me && !me.dead) ? me : leader;
+    camX = follow.x - 180;
+
+    while (obstacles.length && obstacles[0].x < camX - 800) obstacles.shift();
+
+    ctx.fillStyle="rgba(0,0,0,0.18)";
+    ctx.fillRect(0,0,rect.width,rect.height);
+
+    const scaleY = rect.height / TRACK_H;
+
+    for (let slot=1; slot<=4; slot++){
+      const top = laneTop(slot)*scaleY;
+      const h = LANE_H*scaleY;
+      ctx.fillStyle="rgba(255,255,255,0.04)";
+      ctx.fillRect(0,top,rect.width,h);
+      if (slot!==1){
+        ctx.strokeStyle="rgba(255,255,255,0.12)";
+        ctx.lineWidth=2;
+        ctx.beginPath(); ctx.moveTo(0,top); ctx.lineTo(rect.width,top); ctx.stroke();
+      }
+      ctx.fillStyle="rgba(255,255,255,0.75)";
+      ctx.font="12px system-ui";
+      ctx.fillText(`P${slot}`, 10, top+16);
+    }
+
+    ctx.fillStyle="rgba(255,90,90,0.95)";
+    for (const o of obstacles){
+      const sx = (o.x - camX);
+      const sy = (o.y * scaleY);
+      if (sx>-80 && sx<rect.width+80) drawObstacle(o, sx, sy);
+    }
+
+    for (const p of players){
+      const sx = (p.x - camX);
+      const sy = (p.y * scaleY);
+      drawSamurai(sx, sy, p.w, p.h, p.color);
+
+      ctx.fillStyle="rgba(0,0,0,0.55)";
+      ctx.fillRect(sx-6, sy-18, 160, 16);
+
+      ctx.fillStyle=p.color;
+      ctx.font="12px system-ui";
+      const role = p.isCpu ? "CPU" : "HUMAN";
       const status = p.dead ? "💀" : "⚔️";
-      ctx.fillText(`P${i+1} ${status} ${mode}`, vp.x + 10, vp.y + 18);
-      ctx.fillStyle = "rgba(255,255,255,0.75)";
-      ctx.fillText(`Distance: ${Math.floor(p.score/10)}m`, vp.x + 10, vp.y + 36);
-
-      // border
-      ctx.strokeStyle = "rgba(255,255,255,0.18)";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(vp.x + 1, vp.y + 1, vp.w - 2, vp.h - 2);
-
-      ctx.restore();
+      ctx.fillText(`${status} ${p.name} (${role})`, sx, sy-6);
     }
 
-    hintEl.textContent =
-      `Desktop: P1 arrows, P2 WASD, P3 IJKL, P4 numpad 4/6/8 | Mobile: touch controls (P1) | Alive: ${aliveCount}/4`;
+    const alive = players.filter(p=>!p.dead).length;
+    const dist = me ? Math.floor(me.distance/10) : 0;
+    hintEl.textContent = `You are P${mySlot} (${myName}) | Distance: ${dist}m | Alive: ${alive}/4 | Room: ${room}`;
 
-    // if all dead, restart
-    if (aliveCount === 0) {
-      time = 0;
-      for (let i = 0; i < LANES; i++) {
-        players[i] = makePlayer(i);
-        obstacles[i].length = 0;
-        let x = 600;
-        for (let k = 0; k < 6; k++) { spawnObstacle(i, x); x += OBSTACLE_BASE_GAP + rand(-120, 120); }
-      }
-    }
+    if (alive===0) initWorld();
 
-    requestAnimationFrame(frame);
+    requestAnimationFrame(loop);
   }
-
-  requestAnimationFrame(frame);
+  requestAnimationFrame(loop);
 })();
